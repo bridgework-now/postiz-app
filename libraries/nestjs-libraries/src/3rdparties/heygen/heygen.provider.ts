@@ -26,7 +26,7 @@ export class HeygenProvider extends ThirdPartyAbstract<{
   async checkConnection(
     apiKey: string
   ): Promise<false | { name: string; username: string; id: string }> {
-    const list = await fetch('https://api.heygen.com/v1/user/me', {
+    const list = await fetch('https://api.heygen.com/v3/users/me', {
       method: 'GET',
       headers: {
         accept: 'application/json',
@@ -53,56 +53,82 @@ export class HeygenProvider extends ThirdPartyAbstract<{
     };
   }
 
-  async voices(apiKey: string) {
-    const {
-      data: { voices },
-    } = await (
-      await fetch('https://api.heygen.com/v2/voices', {
+  private async listPages(
+    apiKey: string,
+    path: string,
+    maximum = Infinity
+  ) {
+    const url = new URL(path, 'https://api.heygen.com');
+    url.searchParams.set('limit', String(Math.min(50, maximum)));
+    const items = [];
+    const tokens = new Set<string>();
+    while (true) {
+      const response = await fetch(url.toString(), {
         method: 'GET',
         headers: {
           accept: 'application/json',
           'x-api-key': apiKey,
         },
-      })
-    ).json();
+      });
+      if (!response.ok) {
+        throw new Error('HeyGen listing failed');
+      }
+      const page = await response.json();
+      items.push(...page.data);
+      if (items.length >= maximum || !page.has_more) {
+        return items.slice(0, maximum);
+      }
+      if (!page.next_token || tokens.has(page.next_token)) {
+        throw new Error('Invalid HeyGen pagination cursor');
+      }
+      tokens.add(page.next_token);
+      url.searchParams.set('token', page.next_token);
+    }
+  }
 
-    return voices.slice(0, 20);
+  async voices(apiKey: string) {
+    const privateVoices = await this.listPages(
+      apiKey,
+      '/v3/models/audio/voices?type=private',
+      20
+    );
+    if (privateVoices.length >= 20) {
+      return privateVoices;
+    }
+    const publicVoices = await this.listPages(
+      apiKey,
+      '/v3/models/audio/voices?type=public',
+      20 - privateVoices.length
+    );
+    return [...privateVoices, ...publicVoices];
   }
 
   async avatars(apiKey: string) {
-    const {
-      data: { avatar_group_list },
-    } = await (
-      await fetch(
-        'https://api.heygen.com/v2/avatar_group.list?include_public=false',
-        {
-          method: 'GET',
-          headers: {
-            accept: 'application/json',
-            'x-api-key': apiKey,
-          },
-        }
-      )
-    ).json();
-
+    const avatarGroups = await this.listPages(
+      apiKey,
+      '/v3/avatars?ownership=private'
+    );
     const loadedAvatars = [];
-    for (const avatar of avatar_group_list) {
-      const {
-        data: { avatar_list },
-      } = await (
-        await fetch(
-          `https://api.heygen.com/v2/avatar_group/${avatar.id}/avatars`,
-          {
-            method: 'GET',
-            headers: {
-              accept: 'application/json',
-              'x-api-key': apiKey,
-            },
-          }
+    for (const avatar of avatarGroups) {
+      const looks = await this.listPages(
+        apiKey,
+        `/v3/avatars/looks?ownership=private&group_id=${encodeURIComponent(avatar.id)}`
+      );
+      loadedAvatars.push(
+        ...looks.map((look) =>
+          look.avatar_type === 'photo_avatar'
+            ? {
+                ...look,
+                image_url: look.preview_image_url,
+              }
+            : {
+                ...look,
+                id: undefined,
+                avatar_id: look.id,
+                avatar_name: look.name,
+              }
         )
-      ).json();
-
-      loadedAvatars.push(...avatar_list);
+      );
     }
 
     return loadedAvatars;
@@ -122,42 +148,25 @@ export class HeygenProvider extends ThirdPartyAbstract<{
     const {
       data: { video_id },
     } = await (
-      await fetch(`https://api.heygen.com/v2/video/generate`, {
+      await fetch(`https://api.heygen.com/v3/videos`, {
         method: 'POST',
         body: JSON.stringify({
-          caption: data.captions === 'yes',
-          video_inputs: [
-            {
-              ...(data.type === 'avatar'
-                ? {
-                    character: {
-                      type: 'avatar',
-                      avatar_id: data.avatar,
-                    },
-                  }
-                : {
-                    character: {
-                      type: 'talking_photo',
-                      talking_photo_id: data.avatar,
-                    },
-                  }),
-              voice: {
-                type: 'text',
-                input_text: data.voice,
-                voice_id: data.selectedVoice,
-              },
+          type: 'avatar',
+          avatar_id: data.avatar,
+          script: data.voice,
+          voice_id: data.selectedVoice,
+          voice_settings: {
+            engine_settings: {
+              engine_type: 'heygen_voice',
+              model: 'heygen-voice-1',
             },
-          ],
-          dimension:
-            data.aspect_ratio === 'story'
-              ? {
-                  width: 720,
-                  height: 1280,
-                }
-              : {
-                  width: 1280,
-                  height: 720,
-                },
+          },
+          engine: { type: 'avatar_iii' },
+          resolution: '720p',
+          aspect_ratio: data.aspect_ratio === 'story' ? '9:16' : '16:9',
+          ...(data.captions === 'yes'
+            ? { caption: { file_format: 'srt', style: 'default' } }
+            : {}),
         }),
         headers: {
           accept: 'application/json',
@@ -175,10 +184,10 @@ export class HeygenProvider extends ThirdPartyAbstract<{
       }
 
       const {
-        data: { status, video_url },
+        data: { status, video_url, captioned_video_url },
       } = await (
         await fetch(
-          `https://api.heygen.com/v1/video_status.get?video_id=${video_id}`,
+          `https://api.heygen.com/v3/videos/${encodeURIComponent(video_id)}`,
           {
             headers: {
               accept: 'application/json',
@@ -190,7 +199,9 @@ export class HeygenProvider extends ThirdPartyAbstract<{
       ).json();
 
       if (status === 'completed') {
-        return video_url;
+        return data.captions === 'yes'
+          ? captioned_video_url || video_url
+          : video_url;
       } else if (status === 'failed') {
         throw new Error('Video generation failed');
       }
