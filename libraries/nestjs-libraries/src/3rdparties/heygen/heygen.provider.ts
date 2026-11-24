@@ -155,6 +155,12 @@ export class HeygenProvider extends ThirdPartyAbstract<{
           avatar_id: data.avatar,
           script: data.voice,
           voice_id: data.selectedVoice,
+          voice_settings: {
+            engine_settings: {
+              engine_type: 'heygen_voice',
+              model: 'heygen-voice-1',
+            },
+          },
           engine: { type: 'avatar_iii' },
           resolution: '720p',
           aspect_ratio: data.aspect_ratio === 'story' ? '9:16' : '16:9',
